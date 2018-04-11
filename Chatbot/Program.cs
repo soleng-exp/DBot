@@ -1,43 +1,164 @@
 ﻿using System;
+using System.Diagnostics;
+using System.IO;
 using System.Threading.Tasks;
-using Discord;
-using Discord.WebSocket;
+using DSharpPlus;
+using DSharpPlus.CommandsNext;
+using DSharpPlus.CommandsNext.Attributes;
+using DSharpPlus.Interactivity;
+using DSharpPlus.VoiceNext;
 
 namespace Chatbot
 {
     public class Program
     {
-        private const string Token = "NDMzMjAyNzkyMTQ0ODMwNDc0.Da5lIg.XPi51Srkgmf9EIWlJrUfAhtBc4A"; // Remember to keep this private!
-        private DiscordSocketClient _client;
-        
-        public static void Main(string[] args) => new Program().MainAsync().GetAwaiter().GetResult();
+        static DiscordClient discord;
+        static CommandsNextModule commands;
+        static InteractivityModule interactivity;
+        static VoiceNextClient voice;
 
-        private async Task MainAsync()
+        static void Main(string[] args) => MainAsync(args).ConfigureAwait(false).GetAwaiter().GetResult();
+
+        static async Task MainAsync(string[] args)
         {
-            _client = new DiscordSocketClient();
+            discord = new DiscordClient(new DiscordConfiguration
+            {
+                Token = "Your...Token",
+                TokenType = TokenType.Bot,
+            });
 
-            _client.Log += Log;
-//            _client.MessageReceived += MessageReceived;
+            discord.MessageCreated += async e =>
+            {
+                if (e.Message.Content.ToLower().StartsWith("ping"))
+                    await e.Message.RespondAsync("pong!");
+            };
 
-            await _client.LoginAsync(TokenType.Bot, Token);
-            await _client.StartAsync();
+            interactivity = discord.UseInteractivity(new InteractivityConfiguration());
+            voice = discord.UseVoiceNext();
 
-            // Block this task until the program is closed.
+            commands = discord.UseCommandsNext(new CommandsNextConfiguration
+            {
+                StringPrefix = ";;",
+                EnableDms = false
+            });
+            commands.RegisterCommands<MyCommands>();
+
+            await discord.ConnectAsync();
             await Task.Delay(-1);
         }
-        
-        private static async Task MessageReceived(SocketMessage message)
+    }
+
+    public class MyCommands
+    {
+        [Command("hi")]
+        public async Task Hi(CommandContext ctx)
         {
-            if (message.Content == "!ping")
-            {
-                await message.Channel.SendMessageAsync("Pong!");
-            }
+            await ctx.RespondAsync($"👋 Hi, {ctx.User.Mention}!");
+
+            var interactivity = ctx.Client.GetInteractivityModule();
+            var msg = await interactivity.WaitForMessageAsync(
+                xm => xm.Author.Id == ctx.User.Id && xm.Content.ToLower() == "how are you?", TimeSpan.FromMinutes(1));
+            if (msg != null)
+                await ctx.RespondAsync($"I'm fine, thank you!");
         }
-        
-        private static Task Log(LogMessage msg)
+
+        [Command("random")]
+        public async Task Random(CommandContext ctx, int min, int max)
         {
-            Console.WriteLine(msg.ToString());
-            return Task.CompletedTask;
+            var rnd = new Random();
+            await ctx.RespondAsync($"🎲 Your random number is: {rnd.Next(min, max)}");
+        }
+
+        [Command("join"), Description("Joins a voice channel.")]
+        public async Task Join(CommandContext ctx)
+        {
+            var vnext = ctx.Client.GetVoiceNextClient();
+            if (vnext == null)
+            {
+                // not enabled
+                await ctx.RespondAsync("VNext is not enabled or configured.");
+                return;
+            }
+            
+            var vnc = vnext.GetConnection(ctx.Guild);
+            if (vnc != null)
+            {
+                await ctx.RespondAsync($"Already connected in this guild.");
+                return;
+            }
+
+            var chn = ctx.Member?.VoiceState?.Channel;
+            if (chn == null)
+            {
+                await ctx.RespondAsync($"You need to be in a voice channel.");
+                return;
+            }
+            Console.WriteLine("Pre - Here ?");
+
+            vnc = await vnext.ConnectAsync(chn);
+            Console.WriteLine("Here ?");
+            await ctx.RespondAsync($"👌 Connected to `{chn.Name}`");
+        }
+
+        [Command("leave")]
+        public async Task Leave(CommandContext ctx)
+        {
+            var vnext = ctx.Client.GetVoiceNextClient();
+
+            var vnc = vnext.GetConnection(ctx.Guild);
+            if (vnc == null)
+            {
+                await ctx.RespondAsync($"Not connected in this guild.");
+                return;
+            }
+
+            vnc.Disconnect();
+            await ctx.RespondAsync("👌");
+        }
+
+        [Command("play")]
+        public async Task Play(CommandContext ctx, [RemainingText] string file)
+        {
+            var vnext = ctx.Client.GetVoiceNextClient();
+
+            var vnc = vnext.GetConnection(ctx.Guild);
+            if (vnc == null)
+            {
+                await ctx.RespondAsync($"Not connected in this guild.");
+                return;
+            }
+
+            if (!File.Exists(file))
+            {
+                await ctx.RespondAsync($"File was not found.");
+                return;
+            }
+
+            await ctx.RespondAsync("👌");
+            await vnc.SendSpeakingAsync(true); // send a speaking indicator
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ffmpeg",
+                Arguments = $@"-i ""{file}"" -ac 2 -f s16le -ar 48000 pipe:1",
+                RedirectStandardOutput = true,
+                UseShellExecute = false
+            };
+            var ffmpeg = Process.Start(psi);
+            var ffout = ffmpeg.StandardOutput.BaseStream;
+
+            var buff = new byte[3840];
+            var br = 0;
+            while ((br = ffout.Read(buff, 0, buff.Length)) > 0)
+            {
+                if (br < buff.Length) // not a full sample, mute the rest
+                    for (var i = br; i < buff.Length; i++)
+                        buff[i] = 0;
+
+                await vnc.SendAsync(buff, 20);
+            }
+
+            await vnc.SendSpeakingAsync(false); // we're not speaking anymore
         }
     }
 }
